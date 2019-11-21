@@ -1,0 +1,211 @@
+---
+title: "Bootstrap TC ~ TC pgs in PRAD"
+author: "Nathalie Nilsson"
+date: "November 19, 2019"
+output: 
+  html_document: 
+    df_print: kable
+    theme: paper
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+v3: New phenotype data used, compiled for baseline, young cases excluded
+
+### Project
+```{r}
+path.to.project <- paste(rprojroot::find_rstudio_root_file(), "/", sep = "")
+path.to.project
+```
+
+### Working directory relative to project
+```{r}
+gsub(rprojroot::find_rstudio_root_file(), "", getwd())
+```
+
+
+### Input
+Input relative to project directory:
+```{r}
+score.files <- "pg_scoring/preventad/prad_v1/score_files/"
+score.range <- "pg_scoring/preventad/prad_v1/scoring_range.txt"
+
+dep.var <- "tc.mM"
+covar.file <- "data/preventad/prad_covar_bl_data_v2.txt"
+covars <- c("sex", "tc.age", "apoe4.bin")
+int.var <- "statin"
+
+output.name.org 	<- "boot_tc_v3"
+output.dir      <- "analyses/preventad/boot_tc_v3/"
+```
+
+Input for analysis:
+```{r}
+n.pcs <- 5 # number of genetic principal components to include as covariates
+n.bootstrap <- 100
+```
+
+### Libraries
+```{r}
+library(tidyverse)
+library(rcompanion)
+library(boot)
+library(data.table)
+```
+
+### Data
+```{r}
+covar <- read.table(paste(path.to.project, covar.file, sep = "/"), 
+                    header = TRUE, sep = "\t")
+head(covar)
+
+pcs <- paste("PC", 1:n.pcs, sep = "")
+```
+
+**Filter for non-missing values in tc.mM column**
+```{r}
+m.f <- filter(covar, !is.na(tc.mM)) %>%
+  select("iid", pcs, covars, int.var, dep.var)
+```
+
+**Complete cases**
+```{r}
+m.all <- m.f[complete.cases(m.f), ] %>%
+  rename(IID = iid)
+
+head(m.all)
+length(unique(m.all$IID)) == nrow(m.all)
+```
+
+**Excluded data**
+```{r}
+m.excl <- select(covar, iid, pcs, covars, int.var, dep.var) %>%
+    filter(!iid %in% m.all$IID)
+m.excl
+```
+
+**Descriptives**
+```{r}
+m.dt <- data.table(m.all)
+
+# Stats ####
+age.ttest <- t.test(m.dt[statin == 0, "tc.age"], m.dt[statin == 1, "tc.age"])
+tc.ttest <- t.test(m.dt[statin == 0, "tc.mM"], m.dt[statin == 1, "tc.mM"])
+apoe4.chisq <- chisq.test(table(m.all$statin, m.all$apoe4.bin))
+sex.chisq <- chisq.test(table(m.all$statin, m.all$sex))
+
+# Summarized data ####
+m.g <- group_by(m.all, statin) %>%
+    summarise(
+        N_tot = length(IID),
+        N_Females = sum(sex == "Female"), 
+        Perc_Females = N_Females/N_tot,
+        Perc_e4 = sum(apoe4.bin)/N_tot,
+        Mean.age = mean(tc.age), 
+        Mean.TC = mean(tc.mM)) %>%
+    t() %>%
+    data.frame()
+m.g$p.value <- c(NA, NA, sex.chisq$p.value, sex.chisq$p.value, apoe4.chisq$p.value, age.ttest$p.value, tc.ttest$p.value)
+
+write.table(m.g, paste(output.name.org, "_desc.txt", sep = ""), 
+            col.names = FALSE, quote = FALSE, sep = "\t")
+
+knitr::kable(apply(m.g, 2, function(x) round(x, 3)))
+```
+
+
+### PG scoring
+```{r}
+# New complete paths ####
+score.files <- paste(path.to.project, score.files, sep = "/")
+score.range <- paste(path.to.project, score.range, sep = "/")
+
+output.dir      <- paste(path.to.project, output.dir, sep = "")
+
+my.ls1 <- c(ls(), "my.ls1")
+my.ls1
+```
+
+**All subjects**
+```{r}
+m.cc <- m.all
+output.name <- output.name.org
+covars <- c(covars[1:2], int.var)
+
+source(paste(path.to.project, "scripts/lm_boot_forRmd_v2.R", sep = ""))
+
+# Number of SNPs per score
+n.snps <- select(m.cc, contains("CNTS")) %>%
+    unique() %>%
+    `row.names<-`("n.alleles") %>%
+    t() %>%
+    as.data.frame(optional = TRUE) %>%
+    rownames_to_column() %>%
+    separate(rowname, c("throw", "label"), sep = -3) %>%
+    mutate(n.snps = n.alleles/2) %>%
+    merge.data.frame(my.range.list)
+
+n.snps
+```
+
+**Statin negative subjects**
+```{r}
+ls2 <- ls()
+rm(list = ls2[!ls2 %in% my.ls1])
+
+m.cc <- filter(m.all, statin == 0)
+output.name <- paste(output.name.org, "_offstatin", sep = "")
+covars <- covars[!grepl(int.var, covars)]
+
+source(paste(path.to.project, "scripts/lm_boot_forRmd.R", sep = ""))
+```
+
+**Statin positive subjects**
+```{r}
+ls2 <- ls()
+rm(list = ls2[!ls2 %in% my.ls1])
+
+m.cc <- filter(m.all, statin == 1)
+output.name <- paste(output.name.org, "_onstatin", sep = "")
+covars <- covars[!grepl(int.var, covars)]
+
+source(paste(path.to.project, "scripts/lm_boot_forRmd.R", sep = ""))
+```
+
+### Results plotted
+```{r fig1, fig.height = 6, fig.width = 12, echo=FALSE}
+all <- read.table(paste(output.name.org, "_Results.txt", sep = ""), header = TRUE) %>%
+  mutate(pop = "all")
+neg <- read.table(paste(output.name.org, "_offstatin_Results.txt", sep = ""), header = TRUE)  %>%
+  mutate(pop = "Off statins")
+pos <- read.table(paste(output.name.org, "_onstatin_Results.txt", sep = ""), header = TRUE) %>%
+  mutate(pop = "On statins")
+
+m2 <- rbind.data.frame(all, neg, pos) %>%
+  merge.data.frame(my.range.list)
+
+ggplot(m2, aes(x = factor(pmax), y = Mean.value.R2, color = -log10(Original.value.P))) +
+    geom_point(size = 3, shape = 18) +
+    geom_errorbar(aes(ymin = Mean.value.R2 - SD.value.R2, ymax = Mean.value.R2 + SD.value.R2), 
+                  width = 0.3, size = 1) +
+    labs(title = paste(dep.var, "~ PGS"), 
+         caption = paste("corrected for:", paste(c(paste("PC1-", n.pcs, sep = ""), covars, "and statin use for the 'all' group"), collapse = ", "), "\nerror bars indicate SD"), 
+         y = "Additional R2 explained by PGS", 
+         x = "P cut-off") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+   facet_grid(~pop)
+```
+
+### TC ~ statin use * TC-pgs
+```{r}
+tc.data <- read.table(paste(output.name.org, "_data.txt", sep = ""), header = TRUE)
+head(tc.data)
+```
+
+```{r}
+ggplot(tc.data, aes(SCORES06, tc.mM, color = factor(statin))) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
